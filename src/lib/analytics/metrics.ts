@@ -5,6 +5,8 @@
 export interface TradeRecord {
   id: string;
   symbol: string;
+  /** Asset class (crypto, forex, metals, stocks, …). */
+  market?: string;
   strategy: string | null;
   timeframe: string;
   direction: "long" | "short";
@@ -231,6 +233,7 @@ export interface AnalyticsReport {
   byHolding: GroupStat[];
   byMode: GroupStat[];
   bySymbol: GroupStat[];
+  byMarket: GroupStat[];
 }
 
 export function buildReport(trades: TradeRecord[], opts: { startingEquity?: number; timeZone?: string } = {}): AnalyticsReport {
@@ -246,5 +249,6 @@ export function buildReport(trades: TradeRecord[], opts: { startingEquity?: numb
     byHolding: groupBy(trades, (t) => holdingBucket(t.exitTime - t.entryTime), HOLD_ORDER),
     byMode: groupBy(trades, (t) => t.mode, ["historical", "live"]),
     bySymbol: groupBy(trades, (t) => t.symbol),
+    byMarket: groupBy(trades, (t) => t.market ?? "unknown"),
   };
 }

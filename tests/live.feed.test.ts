@@ -30,13 +30,14 @@ beforeEach(async () => {
     .set({ costs: { makerFeeBps: 0, takerFeeBps: 0, spreadBps: 0, slippageBps: 0 } })
     .where(eq(paperAccounts.id, LIVE_ACCOUNT_ID))
     .run();
-  upsertInstrument(db, "binance", { ...BTC, baseAsset: "BTC", quoteAsset: "USDT" });
+  // Legacy-style spec (no leverage) so these tests isolate feed behaviour from margin rules.
+  upsertInstrument(db, "binance", { ...BTC, baseAsset: "BTC", quoteAsset: "USDT" }, "crypto", { leverage: 100 });
   provider = new FakeProvider();
   clock = T0;
-  feed = new LiveFeed({ getDb: () => db, provider, now: () => clock, timers: false, staleAfterMs: () => 20_000 });
+  feed = new LiveFeed({ getDb: () => db, getProvider: () => provider, now: () => clock, timers: false, staleAfterMs: () => 20_000 });
   feed.start();
   events = [];
-  feed.watch("BTCUSDT", "1m", (e) => events.push(e));
+  feed.watch("binance:BTCUSDT", "1m", (e) => events.push(e));
   provider.handlers!.onStatus("connected");
   await flush();
 });
@@ -61,7 +62,7 @@ const place = (extra: Record<string, unknown> = {}) =>
 describe("live paper trading", () => {
   it("streams prices and executes stop losses from kline updates", async () => {
     tick(bar(T0, 100, 100.2, 99.8, 100));
-    expect(feed.snapshot("BTCUSDT").ok).toBe(true);
+    expect(feed.snapshot("binance:BTCUSDT").ok).toBe(true);
     await place({ sl: 99, tp: 102 });
     expect(listPositions(db, LIVE_ACCOUNT_ID, { status: "open" })).toHaveLength(1);
 
@@ -99,8 +100,8 @@ describe("live paper trading", () => {
     tick(bar(T0, 100, 100.2, 99.8, 100));
     clock += 25_000;
     feed.tick();
-    expect(feed.statusEvent().status).toBe("stale");
-    expect(feed.snapshot("BTCUSDT").ok).toBe(false);
+    expect(feed.statusEvent("binance").status).toBe("stale");
+    expect(feed.snapshot("binance:BTCUSDT").ok).toBe(false);
     await expect(place()).rejects.toThrow(/stale|No price is assumed/);
   });
 
@@ -119,7 +120,7 @@ describe("live paper trading", () => {
     await place({ sl: 95, tp: 110 });
 
     provider.handlers!.onStatus("disconnected", "network");
-    expect(feed.statusEvent().status).toBe("disconnected");
+    expect(feed.statusEvent("binance").status).toBe("disconnected");
 
     // While offline the market dropped through the stop at 08:05.
     provider.data["1m"] = [1, 2, 3, 4, 5, 6, 7, 8, 9].map((m) =>
@@ -144,9 +145,9 @@ describe("live paper trading", () => {
     expect(logged).toHaveLength(1);
     expect(events.some((e) => e.type === "notice" && e.level === "warn")).toBe(true);
     // Not tradable until a fresh streamed price arrives after reconnecting.
-    expect(feed.snapshot("BTCUSDT").ok).toBe(false);
+    expect(feed.snapshot("binance:BTCUSDT").ok).toBe(false);
     tick(bar(T0 + 10 * MIN, 97, 97.6, 96.8, 97.2));
-    expect(feed.snapshot("BTCUSDT").ok).toBe(true);
+    expect(feed.snapshot("binance:BTCUSDT").ok).toBe(true);
   });
 
   it("stays unreconciled (and processes nothing) if missed data cannot be fetched", async () => {
@@ -160,12 +161,12 @@ describe("live paper trading", () => {
     provider.handlers!.onStatus("connected");
     await flush();
     await flush();
-    const snap = feed.snapshot("BTCUSDT");
+    const snap = feed.snapshot("binance:BTCUSDT");
     expect(snap.ok).toBe(false);
     // A stream update through the stop must NOT be applied over an unreconciled gap.
     tick(bar(T0 + 5 * MIN, 96, 96, 90, 91));
     expect(listPositions(db, LIVE_ACCOUNT_ID, { status: "open" })).toHaveLength(1);
-    expect(feed.snapshot("BTCUSDT").reason).toMatch(/Reconciling/);
+    expect(feed.snapshot("binance:BTCUSDT").reason).toMatch(/Reconciling/);
   });
 
   it("falls back to REST when whole minutes are missing from the stream", async () => {

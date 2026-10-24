@@ -1,9 +1,9 @@
 "use client";
 
 import { useMemo } from "react";
-import { feeFor, roundToStep, sidePrice } from "@/lib/engine/math";
+import { feeFor, fxRate, marginFor, roundToStep, sidePrice } from "@/lib/engine/math";
 import { riskPositionSize } from "@/lib/engine/sizing";
-import type { CostModel, InstrumentSpec } from "@/lib/engine/types";
+import type { Conversion, CostModel, InstrumentSpec } from "@/lib/engine/types";
 import { fmtMoney, fmtPrice, fmtQty } from "@/lib/client/format";
 import type { Strategy, TicketDraft } from "@/lib/client/types";
 
@@ -12,8 +12,13 @@ interface Props {
   onChange: (d: TicketDraft) => void;
   spec: InstrumentSpec;
   costs: CostModel;
+  conversion?: Conversion;
+  accountCurrency: string;
+  /** coin | lot | share | contract */
+  unit: string;
   price: number | null;
   equity: number;
+  freeMargin?: number | null;
   strategies: Strategy[];
   disabledReason: string | null;
   submitting: boolean;
@@ -37,7 +42,7 @@ function NumField({ label, value, onChange, step, placeholder, disabled }: { lab
   );
 }
 
-export function computeTicket(draft: TicketDraft, spec: InstrumentSpec, costs: CostModel, price: number | null, equity: number) {
+export function computeTicket(draft: TicketDraft, spec: InstrumentSpec, costs: CostModel, price: number | null, equity: number, conversion?: Conversion) {
   const entryRef = draft.type === "market" ? (price != null ? sidePrice(price, draft.side, costs) : null) : draft.entry;
   let qty = draft.qty ?? 0;
   let sizingError: string | null = null;
@@ -46,18 +51,25 @@ export function computeTicket(draft: TicketDraft, spec: InstrumentSpec, costs: C
       qty = 0;
       sizingError = "Set a stop loss to size by risk";
     } else {
-      const r = riskPositionSize({ equity, riskPercent: draft.riskPercent, entry: entryRef, stop: draft.sl, side: draft.side, spec, costs });
+      const r = riskPositionSize({ equity, riskPercent: draft.riskPercent, entry: entryRef, stop: draft.sl, side: draft.side, spec, costs, conversion });
       qty = r.qty;
       sizingError = r.error;
     }
   } else {
     qty = roundToStep(qty, spec.qtyStep, "down");
   }
-  const risk = entryRef != null && draft.sl != null && qty > 0 ? Math.abs(entryRef - draft.sl) * qty * spec.contractSize : null;
-  const reward = entryRef != null && draft.tp != null && qty > 0 ? Math.abs(draft.tp - entryRef) * qty * spec.contractSize : null;
+  // All money in account currency; P&L converts at the price it would be realised.
+  const risk = entryRef != null && draft.sl != null && qty > 0 ? Math.abs(entryRef - draft.sl) * qty * spec.contractSize * fxRate(draft.sl, conversion) : null;
+  const reward = entryRef != null && draft.tp != null && qty > 0 ? Math.abs(draft.tp - entryRef) * qty * spec.contractSize * fxRate(draft.tp, conversion) : null;
   const rr = risk && reward ? reward / risk : null;
-  const notional = entryRef != null ? entryRef * qty * spec.contractSize : null;
-  const fees = entryRef != null && qty > 0 ? feeFor(entryRef, qty, spec, draft.type === "limit" ? costs.makerFeeBps : costs.takerFeeBps) * 2 : null;
+  const notional = entryRef != null ? entryRef * qty * spec.contractSize * fxRate(entryRef, conversion) : null;
+  const fees =
+    entryRef != null && qty > 0
+      ? (feeFor(entryRef, qty, spec, draft.type === "limit" ? costs.makerFeeBps : costs.takerFeeBps) * fxRate(entryRef, conversion) + (costs.commissionPerUnit ?? 0) * qty) * 2
+      : null;
+  const margin = entryRef != null && qty > 0 && spec.leverage ? marginFor(entryRef, qty, spec, conversion) : null;
+  /** Account-currency value of a one-tick move for 1 unit of quantity. */
+  const tickValue = entryRef != null ? spec.tickSize * spec.contractSize * fxRate(entryRef, conversion) : null;
 
   let levelError: string | null = null;
   if (entryRef != null) {
@@ -66,13 +78,17 @@ export function computeTicket(draft: TicketDraft, spec: InstrumentSpec, costs: C
     else if (draft.tp != null && (long ? draft.tp <= entryRef : draft.tp >= entryRef)) levelError = `Take profit must be ${long ? "above" : "below"} entry`;
   }
   if (draft.type !== "market" && draft.entry == null) levelError = "Set an entry price";
-  return { entryRef, qty, sizingError, risk, reward, rr, notional, fees, levelError };
+  return { entryRef, qty, sizingError, risk, reward, rr, notional, fees, margin, tickValue, levelError };
 }
 
-export function OrderTicket({ draft, onChange, spec, costs, price, equity, strategies, disabledReason, submitting, onSubmit }: Props) {
+const UNIT_LABEL: Record<string, [string, string]> = { lot: ["lot", "lots"], share: ["share", "shares"], coin: ["", ""], contract: ["contract", "contracts"] };
+
+export function OrderTicket({ draft, onChange, spec, costs, conversion, accountCurrency, unit, price, equity, freeMargin, strategies, disabledReason, submitting, onSubmit }: Props) {
   const set = (patch: Partial<TicketDraft>) => onChange({ ...draft, ...patch });
-  const t = useMemo(() => computeTicket(draft, spec, costs, price, equity), [draft, spec, costs, price, equity]);
+  const t = useMemo(() => computeTicket(draft, spec, costs, price, equity, conversion), [draft, spec, costs, price, equity, conversion]);
   const long = draft.side === "buy";
+  const unitLabel = (q: number) => (UNIT_LABEL[unit]?.[q === 1 ? 0 : 1] ?? "") || "";
+  const marginShort = t.margin != null && freeMargin != null && t.margin > freeMargin;
   const canSubmit = !disabledReason && !submitting && t.qty > 0 && !t.levelError && !(draft.sizing === "risk" && t.sizingError);
 
   const quick = (kind: "sl" | "tp") => {
@@ -152,21 +168,28 @@ export function OrderTicket({ draft, onChange, spec, costs, price, equity, strat
             <NumField label="Risk % of equity" value={draft.riskPercent} step={0.1} onChange={(v) => set({ riskPercent: v ?? 0 })} />
             <div>
               <span className="label">Quantity</span>
-              <div className="num rounded-md border border-line px-2 py-[5px]">{t.qty > 0 ? fmtQty(t.qty, spec.qtyStep) : "—"}</div>
+              <div className="num rounded-md border border-line px-2 py-[5px]">{t.qty > 0 ? `${fmtQty(t.qty, spec.qtyStep)} ${unitLabel(t.qty)}` : "—"}</div>
             </div>
           </div>
         ) : (
-          <NumField label="Quantity" value={draft.qty} step={spec.qtyStep} onChange={(v) => set({ qty: v })} />
+          <NumField label={`Quantity${unit !== "coin" ? ` (${unitLabel(2)})` : ""}`} value={draft.qty} step={spec.qtyStep} onChange={(v) => set({ qty: v })} />
         )}
       </div>
 
       <div className="space-y-1 rounded-md border border-line p-2 text-[12px]">
-        <Row k="Risk" v={t.risk != null ? `${fmtMoney(t.risk)} (${((t.risk / equity) * 100).toFixed(2)}%)` : "—"} />
+        <Row k={`Risk (${accountCurrency})`} v={t.risk != null ? `${fmtMoney(t.risk)} (${((t.risk / equity) * 100).toFixed(2)}%)` : "—"} />
         <Row k="Reward" v={t.reward != null ? fmtMoney(t.reward) : "—"} />
         <Row k="R:R" v={t.rr != null ? `1 : ${t.rr.toFixed(2)}` : "—"} />
         <Row k="Notional" v={t.notional != null ? fmtMoney(t.notional) : "—"} />
-        <Row k="Est. fees (round trip)" v={t.fees != null ? fmtMoney(t.fees) : "—"} />
+        {spec.leverage ? (
+          <Row k={`Margin (1:${spec.leverage})`} v={t.margin != null ? fmtMoney(t.margin) : "—"} warn={marginShort} />
+        ) : null}
+        <Row k="Est. fees + commission" v={t.fees != null ? fmtMoney(t.fees) : "—"} />
+        {t.tickValue != null && unit !== "coin" && (
+          <Row k={`Value per tick / ${unitLabel(1) || "unit"}`} v={`${fmtMoney(t.tickValue, { decimals: t.tickValue < 1 ? 4 : 2 })}`} />
+        )}
       </div>
+      {marginShort && <p className="text-[12px] text-warn">Not enough free margin ({fmtMoney(freeMargin)}).</p>}
 
       <div className="grid grid-cols-2 gap-2">
         <label className="block">
@@ -197,7 +220,7 @@ export function OrderTicket({ draft, onChange, spec, costs, price, equity, strat
         className={`btn w-full py-2 ${long ? "btn-buy" : "btn-sell"}`}
         onClick={() => onSubmit({ side: draft.side, type: draft.type, qty: t.qty, price: draft.type === "market" ? null : draft.entry, sl: draft.sl, tp: draft.tp })}
       >
-        {submitting ? "Sending…" : `${long ? "Buy" : "Sell"} ${t.qty > 0 ? fmtQty(t.qty, spec.qtyStep) : ""} ${draft.type === "market" ? "at market" : `${draft.type} @ ${fmtPrice(draft.entry, spec.tickSize)}`}`}
+        {submitting ? "Sending…" : `${long ? "Buy" : "Sell"} ${t.qty > 0 ? `${fmtQty(t.qty, spec.qtyStep)} ${unitLabel(t.qty)}` : ""} ${draft.type === "market" ? "at market" : `${draft.type} @ ${fmtPrice(draft.entry, spec.tickSize)}`}`}
       </button>
       <p className="text-[11px] leading-relaxed text-faint">
         Chart: <b className="font-medium text-muted">Alt+click</b> entry · <b className="font-medium text-muted">Shift+click</b> SL ·{" "}
@@ -207,11 +230,11 @@ export function OrderTicket({ draft, onChange, spec, costs, price, equity, strat
   );
 }
 
-function Row({ k, v }: { k: string; v: string }) {
+function Row({ k, v, warn }: { k: string; v: string; warn?: boolean }) {
   return (
-    <div className="flex justify-between">
+    <div className="flex justify-between gap-2">
       <span className="text-muted">{k}</span>
-      <span className="num">{v}</span>
+      <span className={`num ${warn ? "text-warn" : ""}`}>{v}</span>
     </div>
   );
 }

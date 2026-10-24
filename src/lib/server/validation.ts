@@ -15,6 +15,7 @@ export const costsSchema = z.object({
   takerFeeBps: z.number().min(0).max(1000),
   spreadBps: z.number().min(0).max(1000),
   slippageBps: z.number().min(0).max(1000),
+  commissionPerUnit: z.number().min(0).max(10_000).optional(),
 });
 
 export const timeframeSchema = z.enum(TIMEFRAMES);
@@ -22,7 +23,7 @@ export const timeframeSchema = z.enum(TIMEFRAMES);
 export const createSessionSchema = z
   .object({
     name: z.string().max(100).optional(),
-    source: z.enum(["binance", "csv"]),
+    source: z.enum(["auto", "binance", "dukascopy", "oanda", "alpaca", "csv"]),
     symbol: symbol.optional(),
     datasetId: z.number().int().positive().optional(),
     timeframe: timeframeSchema,
@@ -33,6 +34,7 @@ export const createSessionSchema = z
     strategyId: z.number().int().positive().nullable().optional(),
     costs: costsSchema.optional(),
     resolveLowerTf: z.boolean().optional(),
+    leverage: z.number().min(1).max(500).optional(),
   })
   .refine((v) => v.to > v.from, { message: "End must be after start", path: ["to"] });
 
@@ -92,6 +94,7 @@ export const settingsSchema = z.object({
   }, "Unknown time zone"),
   riskPercent: z.number().positive().max(100),
   costs: costsSchema,
+  costsByAssetClass: z.record(z.string(), costsSchema).default({}),
   staleAfterSeconds: z.number().int().min(5).max(600),
   reconcileLookbackHours: z.number().int().min(1).max(24 * 30),
   defaultSymbol: symbol,
@@ -128,6 +131,7 @@ export function parseJournalFilter(q: URLSearchParams): JournalFilter {
   const direction = q.get("direction");
   return {
     symbol: q.get("symbol") || undefined,
+    market: q.get("market") || undefined,
     strategyId: strategy === "none" ? "none" : strategy ? Number(strategy) : undefined,
     timeframe: q.get("timeframe") || undefined,
     mode: mode === "historical" || mode === "live" ? mode : undefined,

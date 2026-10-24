@@ -88,3 +88,39 @@ Fake WebSocket and REST provider, fixed clock at 2024-03-04 08:00 UTC, zero cost
 ## Analytics and CSV (`tests/analytics-csv.test.ts`)
 
 Trades +200, −100, +150, −100, −100, +300 (start 10,000): win rate **50%**, net **350**, PF **2.17**, avg win **216.67**, avg loss **100**, expectancy **58.33**, avg R **0.58**, max losing streak **2**, max DD **200** (1.95%). Warnings fire for n < 30, for high win rate with negative expectancy, and for "profitable only before costs". The CSV parser handles ISO/epoch/µs times, dedupes rows, counts gaps, and rejects inconsistent OHLC rows.
+
+## Multi-market (`tests/multimarket.*.test.ts`, `tests/providers.test.ts`, `tests/live.quotes.test.ts`)
+
+Additional real fixtures: `tests/fixtures/dukascopy/XAUUSD_2024_01_{BID,ASK}_candles_hour_1.bi5`. These are the original Dukascopy files for **February 2024** (Dukascopy months are zero-based).
+
+| Scenario | Expected |
+|---|---|
+| XAUUSD sizing: $10,000 × 1%, entry 2040, stop 2030, 100 oz lots | $1,000 per lot → **0.10 lots** |
+| EURUSD sizing: 20-pip stop | $200/lot → **0.50 lots**; with $3.50/side commission $207/lot → **0.48** |
+| USDJPY sizing: 1-yen stop at 149 | ¥100,000 ÷ 149 = $671.14/lot → **0.14 lots** |
+| AAPL sizing: $3 stop | **33 shares** |
+| XAUUSD 0.10 lot 2040 → 2050 | **+$100**; margin = 2040 × 0.1 × 100 / 20 = **$1,020** |
+| EURUSD 1 lot +10 pips, $3.50/side | gross **$100**, net **$93** |
+| USDJPY 1 lot 150 → 151 | ¥100,000 ÷ 151 = **$662.25**; fills record fxRate 1/150 and 1/151 |
+| EURGBP 1 lot +10 pips, GBPUSD 1.27 | £100 × 1.27 = **$127** |
+| Margin: $1,000 balance, 1 lot XAU @ 2000 | rejected: "needs 10000.00, free 1000.00" |
+| Margin with other exposure (used $800, unrealized −$100) | 0.01 lot fits exactly; 0.02 rejected |
+| Pending 0.05 lot XAU limit at 1990 after another 0.05 lot filled | free margin at fill $450 < $497.50 → **rejected "at fill"** |
+| Stop-out at 50%: 0.09 lot XAU from 2000, $1,000 balance | close 1940 → 51% (survives); close 1938 → 49.1% → **stop_out at 1938** |
+| Observed spread 0.40 on bar low 2000 | buy limit 2000.10 **not** filled; 2000.20 filled |
+| Financing −6%/yr on 1 lot XAU @ 2000, Wednesday rollover | 3 days: 200,000 × −6% ÷ 365 × 3 = **−$98.63**; Tuesday = 1 day; position opened after the rollover isn't charged |
+| Sessions | FX closed Fri 17:00 → Sun 17:00 NY (EST and EDT); metals break 17:00–18:00; NYSE 09:30–16:00; 2024 holidays incl. Good Friday 03-29 and Juneteenth; 2022-06-20 observed; 2021-12-31 not a holiday |
+| Rollovers in one week | 5, multipliers [1,1,3,1,1], Monday 22:00 UTC (EST), 21:00 UTC in summer |
+| Dukascopy decode | 696 hourly records per side; first ASK O/C/L/H 2040.155/2040.992/2039.395/2042.865; BID open 2039.855 |
+| Dukascopy merge | **481** trading hours (weekends and the daily break dropped); first MID open **2040.005**, close 2040.8185, spread **0.3235** |
+| Provider 4h fetch via fixture server | January requested (404 = no data); 4h-aligned bars starting 2024-02-01 |
+| **XAUUSD backtest (acceptance)** on real data | metals spec (100 oz lots, 1:20, metals calendar), USD account, MID basis; 0.10 lot buy at the ask; gross = Δprice × 0.1 × 100; net = gross − fees + financing; replay verified |
+| Second session over the same range | **zero** new Dukascopy requests (cache + coverage) |
+| Rate-limited (429) ASK file | first attempt fails with "parts were saved"; retry succeeds without re-requesting January |
+| Coverage | covered empty ranges are skipped; adjacent ranges merge |
+| Availability | live XAUUSD unavailable (mentions OANDA), historical → dukascopy; AAPL needs Alpaca; BTCUSDT live → binance |
+| Conversion routing | XAUUSD identity; BTCUSDT identity (USDT≈USD); USDJPY inverse; EURGBP via GBPUSD; EURJPY via 1/USDJPY |
+| OANDA parsing | MBA candles → MID + close spread; incomplete dropped; PRICE lines parsed, heartbeats ignored; unconfigured = unavailable |
+| Alpaca parsing | bars, quotes, bar events, auth errors; IEX disclosure; unconfigured = unavailable |
+| Live FX via quotes (Monday) | fill above mid (configured costs), margin = notional/30; SL on quotes; journal `forex`, `oanda-stream:quotes`, fees $7 |
+| Live FX on Saturday | market order **rejected (market closed)**; limit accepted; a weekend quote through the limit does **not** fill |

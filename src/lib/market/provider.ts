@@ -114,6 +114,8 @@ export interface MarketDataProvider {
    * download and aggregate from (e.g. Dukascopy 15m ← 1m). Undefined = native.
    */
   baseTimeframe?(timeframe: string): string | undefined;
+  /** Optional download chunking at the provider's file boundaries (progress is saved per chunk). */
+  chunkRanges?(from: number, to: number, timeframe: string): [number, number][];
 }
 
 export class MarketDataError extends Error {

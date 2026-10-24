@@ -95,7 +95,8 @@ export class DukascopyProvider implements MarketDataProvider {
     private readonly now: () => number = Date.now,
     sleep?: (ms: number) => Promise<void>,
   ) {
-    this.http = new RateLimitedFetcher({ minIntervalMs: 350, maxAttempts: 7, timeoutMs: 60_000, backoff429Ms: 6_000, fetchImpl, sleep });
+    // Dukascopy throttles hard: serialise requests and back off for up to ~7 minutes per file.
+    this.http = new RateLimitedFetcher({ minIntervalMs: 400, maxAttempts: 11, timeoutMs: 60_000, backoff429Ms: 8_000, fetchImpl, sleep });
   }
 
   capabilities(): ProviderCapabilities {
@@ -228,6 +229,30 @@ export class DukascopyProvider implements MarketDataProvider {
     const inRange = bars.filter((b) => closed(b));
     const result = timeframe === base ? inRange : aggregateBars(inRange, timeframe, now);
     return result.filter((b) => b.time >= from && b.time <= to);
+  }
+
+  /**
+   * Split a range at file boundaries (day for minute data, month for hourly, year for
+   * daily) so callers can save each file's candles as soon as it arrives — a rate-limit
+   * failure then loses at most one file, and a retry resumes where it stopped.
+   */
+  chunkRanges(from: number, to: number, timeframe: string): [number, number][] {
+    const base = this.baseTimeframe(timeframe) ?? timeframe;
+    const step = timeframeMs(timeframe);
+    const next = (t: number) => {
+      const d = new Date(t);
+      if (base === "1m") return Math.floor(t / DAY) * DAY + DAY;
+      if (base === "1h") return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+      return Date.UTC(d.getUTCFullYear() + 1, 0, 1);
+    };
+    const out: [number, number][] = [];
+    for (let a = from; a <= to; ) {
+      const boundary = next(a);
+      const b = Math.min(to, boundary - step);
+      if (b >= a) out.push([a, b]);
+      a = Math.max(boundary, a + step);
+    }
+    return out;
   }
 
   async fetchRecent(symbol: string, timeframe: string, limit: number, endTime?: number): Promise<Bar[]> {

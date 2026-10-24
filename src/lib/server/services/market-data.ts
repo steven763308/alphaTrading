@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
-import type { Bar, Conversion, InstrumentSpec } from "@/lib/engine/types";
+import type { Bar, InstrumentSpec } from "@/lib/engine/types";
 import { aggregateBars } from "@/lib/market/aggregate";
 import { AlpacaProvider } from "@/lib/market/alpaca";
 import { BinanceProvider } from "@/lib/market/binance";
-import { CATALOG, findCatalog, normalizeCurrency, type ProviderId } from "@/lib/market/catalog";
+import { conversionPair } from "@/lib/market/conversion";
+import { findCatalog, type ProviderId } from "@/lib/market/catalog";
 import { DukascopyProvider } from "@/lib/market/dukascopy";
 import { OandaProvider } from "@/lib/market/oanda";
-import { ProviderUnavailableError, type MarketDataProvider, type ProviderCapabilities } from "@/lib/market/provider";
+import { MarketDataError, ProviderUnavailableError, type MarketDataProvider, type ProviderCapabilities } from "@/lib/market/provider";
 import { timeframeMs } from "@/lib/market/timeframes";
 import type { Db } from "../db/client";
 import {
@@ -25,18 +26,19 @@ import {
 
 // ---------------------------------------------------------------- registry
 
-const g = globalThis as unknown as { __tradelabProviders?: Map<string, MarketDataProvider> };
+// Module-scoped (not globalThis) so code/config changes take effect after a dev reload.
+let providers: Map<string, MarketDataProvider> | null = null;
 
 function registry(): Map<string, MarketDataProvider> {
-  if (!g.__tradelabProviders) {
-    g.__tradelabProviders = new Map<string, MarketDataProvider>([
+  if (!providers) {
+    providers = new Map<string, MarketDataProvider>([
       ["binance", new BinanceProvider()],
       ["dukascopy", new DukascopyProvider()],
       ["oanda", new OandaProvider()],
       ["alpaca", new AlpacaProvider()],
     ]);
   }
-  return g.__tradelabProviders;
+  return providers;
 }
 
 export function getProvider(id: string): MarketDataProvider {
@@ -195,13 +197,21 @@ export async function ensureProviderRange(
     return { datasetId: ds.id, fetched };
   }
 
-  const ranges = uncoveredRanges(db, ds.id, from, end, step);
+  // Chunk at the provider's file boundaries and save after each chunk, so a failure
+  // (e.g. rate limiting) keeps everything downloaded so far and a retry resumes.
+  const ranges = uncoveredRanges(db, ds.id, from, end, step).flatMap(([a, b]) => provider.chunkRanges?.(a, b, timeframe) ?? [[a, b] as [number, number]]);
   for (let i = 0; i < ranges.length; i++) {
     const [a, b] = ranges[i];
-    const bars = await provider.fetchCandles(instrument.symbol, timeframe, a, b, {
-      signal,
-      onProgress: (d, t) => onProgress?.({ done: i + d / Math.max(t, 1), total: ranges.length }),
-    });
+    let bars: Bar[];
+    try {
+      bars = await provider.fetchCandles(instrument.symbol, timeframe, a, b, {
+        signal,
+        onProgress: (d, t) => onProgress?.({ done: i + d / Math.max(t, 1), total: ranges.length }),
+      });
+    } catch (err) {
+      const saved = i > 0 ? ` ${i}/${ranges.length} parts were saved; retrying later resumes from there.` : "";
+      throw new MarketDataError(`${provider.name}: ${err instanceof Error ? err.message : String(err)}.${saved}`, err);
+    }
     fetched += insertCandles(db, ds.id, bars);
     addCoverage(db, ds.id, a, b, step);
   }
@@ -283,26 +293,7 @@ export function getDownloadJob(id: string): DownloadJob | undefined {
 
 // ---------------------------------------------------------------- conversion
 
-/**
- * How to convert this instrument's quote currency into the account currency.
- * Returns the kind plus, for crosses, the conversion pair symbol (and whether its
- * price must be inverted). Null when no conversion route exists.
- */
-export function conversionPair(
-  instrument: Pick<InstrumentRow, "symbol" | "baseAsset" | "quoteAsset">,
-  accountCurrency: string,
-): { kind: Conversion["kind"]; pair?: string; invert?: boolean } | null {
-  const acct = normalizeCurrency(accountCurrency);
-  const quote = normalizeCurrency(instrument.quoteAsset ?? "");
-  const base = normalizeCurrency(instrument.baseAsset ?? "");
-  if (!quote || quote === acct) return { kind: "identity" };
-  if (base === acct) return { kind: "inverse" };
-  const direct = CATALOG.find((c) => c.symbol === `${quote}${acct}`);
-  if (direct) return { kind: "rate", pair: direct.symbol, invert: false };
-  const inverse = CATALOG.find((c) => c.symbol === `${acct}${quote}`);
-  if (inverse) return { kind: "rate", pair: inverse.symbol, invert: true };
-  return null;
-}
+export { conversionPair } from "@/lib/market/conversion";
 
 /** Latest close at or before `time` from an ascending series → quote→account rate. */
 export function rateAt(series: Bar[], time: number, invert: boolean): number | null {

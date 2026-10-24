@@ -203,7 +203,7 @@ function openPosition(
   openedThisBar: boolean,
   entryAtOpen: boolean,
 ): Position {
-  const { spec, costs } = ctx;
+  const { spec } = ctx;
   const direction = directionOf(order.side);
   const rate = fxRate(fillPrice, ctx.conversion);
   const fee = fillFee(fillPrice, order.qty, liquidity, ctx);

@@ -401,34 +401,35 @@ export function listEvents(db: Conn, accountId: string, opts: { sessionId?: stri
 }
 
 /** Accounts that currently have live pending orders or open positions, by symbol. */
-export function activeLiveSymbols(db: Conn): string[] {
+/** Instruments (ids like "binance:BTCUSDT") with live pending orders or open positions. */
+export function activeLiveInstruments(db: Conn): string[] {
   const rows = db
-    .select({ symbol: orders.symbol })
+    .select({ id: orders.instrumentId })
     .from(orders)
     .innerJoin(paperAccounts, eq(paperAccounts.id, orders.accountId))
     .where(and(eq(paperAccounts.kind, "live"), eq(orders.status, "pending")))
     .all();
   const prow = db
-    .select({ symbol: positions.symbol })
+    .select({ id: positions.instrumentId })
     .from(positions)
     .innerJoin(paperAccounts, eq(paperAccounts.id, positions.accountId))
     .where(and(eq(paperAccounts.kind, "live"), eq(positions.status, "open")))
     .all();
-  return [...new Set([...rows, ...prow].map((r) => r.symbol))];
+  return [...new Set([...rows, ...prow].map((r) => r.id))];
 }
 
-export function liveAccountsForSymbol(db: Conn, symbol: string): string[] {
+export function liveAccountsForInstrument(db: Conn, instrumentId: string): string[] {
   const a = db
     .select({ id: orders.accountId })
     .from(orders)
     .innerJoin(paperAccounts, eq(paperAccounts.id, orders.accountId))
-    .where(and(eq(paperAccounts.kind, "live"), eq(orders.status, "pending"), eq(orders.symbol, symbol)))
+    .where(and(eq(paperAccounts.kind, "live"), eq(orders.status, "pending"), eq(orders.instrumentId, instrumentId)))
     .all();
   const b = db
     .select({ id: positions.accountId })
     .from(positions)
     .innerJoin(paperAccounts, eq(paperAccounts.id, positions.accountId))
-    .where(and(eq(paperAccounts.kind, "live"), eq(positions.status, "open"), eq(positions.symbol, symbol)))
+    .where(and(eq(paperAccounts.kind, "live"), eq(positions.status, "open"), eq(positions.instrumentId, instrumentId)))
     .all();
   return [...new Set([...a, ...b].map((r) => r.id))];
 }

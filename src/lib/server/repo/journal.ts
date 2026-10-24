@@ -6,6 +6,7 @@ import type { JournalRow } from "./trading";
 
 export interface JournalFilter {
   symbol?: string;
+  market?: string;
   strategyId?: number | "none";
   timeframe?: string;
   mode?: "historical" | "live";
@@ -18,6 +19,7 @@ export interface JournalFilter {
 function where(f: JournalFilter): SQL | undefined {
   const c: SQL[] = [];
   if (f.symbol) c.push(eq(tradeJournal.symbol, f.symbol.toUpperCase()));
+  if (f.market) c.push(eq(tradeJournal.market, f.market));
   if (f.strategyId === "none") c.push(sql`${tradeJournal.strategyId} is null`);
   else if (f.strategyId != null) c.push(eq(tradeJournal.strategyId, f.strategyId));
   if (f.timeframe) c.push(eq(tradeJournal.timeframe, f.timeframe));
@@ -75,6 +77,7 @@ export function journalTradeRecords(db: Db, f: JournalFilter): TradeRecord[] {
     .map((r) => ({
       id: String(r.id),
       symbol: r.symbol,
+      market: r.market,
       strategy: r.strategyName,
       timeframe: r.timeframe,
       direction: r.direction as "long" | "short",
@@ -91,9 +94,9 @@ export function journalTradeRecords(db: Db, f: JournalFilter): TradeRecord[] {
 }
 
 export function journalFacets(db: Db) {
-  const distinct = (col: typeof tradeJournal.symbol | typeof tradeJournal.timeframe) =>
+  const distinct = (col: typeof tradeJournal.symbol | typeof tradeJournal.timeframe | typeof tradeJournal.market) =>
     db.selectDistinct({ v: col }).from(tradeJournal).all().map((r) => r.v);
-  return { symbols: distinct(tradeJournal.symbol), timeframes: distinct(tradeJournal.timeframe) };
+  return { symbols: distinct(tradeJournal.symbol), timeframes: distinct(tradeJournal.timeframe), markets: distinct(tradeJournal.market) };
 }
 
 const CSV_COLUMNS: [string, (r: JournalRow) => unknown][] = [
@@ -115,6 +118,8 @@ const CSV_COLUMNS: [string, (r: JournalRow) => unknown][] = [
   ["final_tp", (r) => r.finalTp ?? ""],
   ["gross_pnl", (r) => r.grossPnl],
   ["fees", (r) => r.fees],
+  ["financing", (r) => r.financing],
+  ["account_currency", (r) => r.accountCurrency],
   ["slippage_spread_cost", (r) => r.slippageCost],
   ["net_pnl", (r) => r.netPnl],
   ["initial_risk", (r) => r.initialRisk ?? ""],

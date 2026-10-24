@@ -77,7 +77,8 @@ export const FLAG_LABELS: Record<string, string> = {
   resolved_lower_tf: "Resolved with 1m data",
   reconciled_gap: "Filled during data-gap reconciliation (approximate)",
   stale_data: "Stale data",
+  stop_out: "Margin stop-out at bar close (exact moment unknown)",
 };
 
 /** Flags that indicate genuine uncertainty (resolved_lower_tf is informational). */
-export const UNCERTAIN_FLAGS = new Set(["ambiguous_sl_tp", "ambiguous_entry_bar", "reconciled_gap", "stale_data"]);
+export const UNCERTAIN_FLAGS = new Set(["ambiguous_sl_tp", "ambiguous_entry_bar", "reconciled_gap", "stale_data", "stop_out"]);

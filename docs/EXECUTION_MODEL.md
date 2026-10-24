@@ -63,3 +63,62 @@ OHLC bars don't tell you the path inside the bar, so the engine never guesses in
 - `advance` requests carry the session `revision`. A stale or duplicated request is a no-op, and concurrent ones conflict (HTTP 409) instead of double-stepping.
 - `simulation_events` is append-only. It records every command (with its cursor position, used for replay verification), every engine event, feed reconciliations, gaps, and account resets.
 - Journal edits touch only annotation columns (`notes`, `setup_quality`, `rule_followed`, `tags`, `annotations`). Execution facts can't be modified through the API.
+
+## Multi-market rules
+
+### Instruments and quantity
+
+| Market | Quantity unit | Contract size | Tick | Default leverage* |
+|---|---|---|---|---|
+| Crypto spot | coins | 1 | exchange tick | 1 (fully funded) |
+| Forex | lots | 100,000 base units | 0.00001 (0.001 for JPY quotes) | 1:30 |
+| XAUUSD | lots | 100 oz | 0.01 | 1:20 |
+| XAGUSD | lots | 5,000 oz | 0.001 | 1:10 |
+| US stocks/ETFs | shares | 1 | 0.01 | 1 |
+
+\*Leverage and financing values are typical retail assumptions, editable per session, and fixed once a session is created so replays stay deterministic.
+
+**Tick value** = tick × contract size × quote→account rate. The ticket shows it per unit.
+
+### Currency conversion
+
+All money (fees, spread/slippage costs, initial risk, P&L, margin, financing) is in the **account currency**: USD for non-crypto sessions, USDT for crypto. USDT is treated as USD 1:1.
+
+| Case | Example | Rule |
+|---|---|---|
+| Quote = account currency | EURUSD, XAUUSD, BTCUSDT | identity |
+| Base = account currency | USDJPY | divide the quote-currency amount by the instrument's own price **at that fill** |
+| Cross | EURGBP, EURJPY | multiply by the conversion pair's rate (GBPUSD close; 1/USDJPY) as of the bar close or live price |
+
+Realised P&L converts at the **exit** fill; risk and entry costs convert at the **entry** fill. In backtests the conversion pair is downloaded automatically from the same provider and stored with the session. Live, the conversion pair is streamed too, and an order is refused if its price is unavailable.
+
+### Costs
+
+- **Percentage fees** (maker/taker bps) on notional.
+- **Fixed commission** per quantity unit per side (e.g. $3.50 per FX lot), in account currency.
+- **Spread:** when a bar carries an observed bid/ask spread (Dukascopy and OANDA store mid prices plus spread), that spread is used for that bar instead of the configured one. Live quote feeds use the quote's own spread.
+- **Slippage** as before (taker fills only).
+
+### Margin, leverage and stop-out
+
+- Margin for a position = notional (account currency) ÷ leverage, reserved at entry.
+- **At placement:** an order is rejected if its margin plus the estimated taker fee exceeds free margin. Free margin = balance + unrealized P&L (all positions) − used margin (all positions).
+- **At fill:** a pending order is re-checked when it would fill, and rejected ("…at fill") if margin is no longer available.
+- **Stop-out:** at each bar close, if equity ÷ used margin < the stop-out level (default 50%), every open position on that instrument is closed at the close price (taker). Those fills are flagged `stop_out` because the true intrabar moment is unknown.
+- Sessions created before multi-market support have no leverage set and keep the original no-margin rules.
+
+### Financing / swaps
+
+At each daily rollover (17:00 New York, DST-aware) inside a bar, every position opened before the rollover is charged or credited notional × annual rate ÷ 365. The rollover on the configured triple day (Wednesday for FX/metals) counts 3 days to cover the weekend. The amount is added to the position's `financing`, applied to the balance immediately, included in net P&L, and logged as a `position_financed` event. It is bar-granular: a position closed earlier in the same bar is not charged.
+
+### Sessions and holidays
+
+| Calendar | Open |
+|---|---|
+| `24x7` | always (crypto) |
+| `fx` | Sunday 17:00 → Friday 17:00 New York; closed Christmas Day and New Year's Day until 17:00 |
+| `metals` | as `fx`, plus a daily 17:00–18:00 New York break |
+| `us_equity` | 09:30–16:00 New York, Mon–Fri, excluding NYSE full-day holidays (New Year, MLK, Presidents, Good Friday, Memorial, Juneteenth from 2022, Independence, Labor, Thanksgiving, Christmas, with weekend-observance rules) |
+
+- **Live:** market orders and manual closes are refused while the market is closed (pending orders are accepted), and no segment is processed off-session, so nothing fills on weekend or after-hours quotes. A quiet feed while every subscribed market is closed is not treated as stale.
+- **Replay:** bars exist only when the market traded. A market order fills at the visible bar's close, which is the last traded price, equivalent to a market-on-close on a session's final bar.

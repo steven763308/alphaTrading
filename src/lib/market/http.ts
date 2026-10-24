@@ -38,7 +38,7 @@ export class RateLimitedFetcher {
           if (res.status === 429 || res.status === 418 || res.status >= 500) {
             lastErr = new MarketDataError(`HTTP ${res.status} from ${new URL(url).host}`);
             const retryAfter = Number(res.headers.get("retry-after"));
-            await this.sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : this.opts.backoff429Ms * attempt);
+            await this.sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : Math.min(this.opts.backoff429Ms * attempt, 60_000));
             continue;
           }
           return res;

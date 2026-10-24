@@ -40,15 +40,17 @@ export function Journal() {
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [symbols, setSymbols] = useState<string[]>([]);
+  const [markets, setMarkets] = useState<string[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const tz = settings?.timeZone ?? "UTC";
 
   useEffect(() => {
-    api<{ rows: JournalRow[]; total: number; facets: { symbols: string[] } }>(`/api/journal${qs({ ...filterQuery(filters), limit: PAGE, offset })}`)
+    api<{ rows: JournalRow[]; total: number; facets: { symbols: string[]; markets: string[] } }>(`/api/journal${qs({ ...filterQuery(filters), limit: PAGE, offset })}`)
       .then((r) => {
         setRows(r.rows);
         setTotal(r.total);
         setSymbols(r.facets.symbols);
+        setMarkets(r.facets.markets);
       })
       .catch((e) => push("error", e.message));
   }, [filters, offset, push]);
@@ -63,8 +65,8 @@ export function Journal() {
   return (
     <div className="flex h-full min-h-0">
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex shrink-0 items-end gap-4 border-b border-line p-3">
-          <Filters value={filters} onChange={changeFilters} strategies={strategies} symbols={symbols} />
+        <div className="flex shrink-0 flex-wrap items-start gap-2 border-b border-line p-2 md:items-end md:gap-4 md:p-3">
+          <Filters value={{ ...emptyFilters, ...filters }} onChange={changeFilters} strategies={strategies} symbols={symbols} markets={markets} />
           <a className="btn ml-auto" href={`/api/journal/export${qs(filterQuery(filters))}`}>
             Export CSV
           </a>
@@ -78,6 +80,7 @@ export function Journal() {
                 <tr>
                   <th>Exit time</th>
                   <th>Mode</th>
+                  <th>Market</th>
                   <th>Symbol</th>
                   <th>TF</th>
                   <th>Strategy</th>
@@ -99,6 +102,7 @@ export function Journal() {
                   <tr key={r.id} className={`clickable ${selected === r.id ? "[&>td]:bg-hover" : ""}`} onClick={() => setSelected(r.id)}>
                     <td className="num text-muted">{fmtTime(r.exitTime, tz)}</td>
                     <td className="text-muted">{r.mode === "live" ? "Live" : "Hist"}</td>
+                    <td className="text-muted">{r.market}</td>
                     <td>{r.symbol}</td>
                     <td className="text-muted">{r.timeframe}</td>
                     <td>{r.strategyName ?? <span className="text-faint">—</span>}</td>
@@ -225,7 +229,8 @@ function TradeDrawer({ id, timeZone, onClose, onSaved, onError }: { id: number; 
   };
 
   return (
-    <aside className="flex w-[520px] shrink-0 flex-col border-l border-line bg-panel">
+    // Full-screen sheet on phones/tablets, side drawer on wide screens.
+    <aside className="fixed inset-0 z-50 flex flex-col bg-panel pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] lg:static lg:z-auto lg:w-[520px] lg:shrink-0 lg:border-l lg:border-line lg:p-0">
       <div className="flex items-center gap-2 border-b border-line p-3">
         <h2 className="font-semibold">
           {entry ? `${entry.symbol} ${entry.direction} · ${entry.timeframe}` : "Loading…"}

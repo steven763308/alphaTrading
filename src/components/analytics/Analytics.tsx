@@ -20,6 +20,7 @@ export function Analytics() {
   const [filters, setFilters] = usePersistentState<FilterState>("tl.analytics.filters", emptyFilters);
   const [report, setReport] = useState<AnalyticsReport | null>(null);
   const [symbols, setSymbols] = useState<string[]>([]);
+  const [markets, setMarkets] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const tz = settings?.timeZone ?? "UTC";
 
@@ -32,14 +33,17 @@ export function Analytics() {
       .catch((e) => setError(e.message));
   }, [filters]);
   useEffect(() => {
-    api<{ facets: { symbols: string[] } }>("/api/journal?limit=1").then((r) => setSymbols(r.facets.symbols));
+    api<{ facets: { symbols: string[]; markets: string[] } }>("/api/journal?limit=1").then((r) => {
+      setSymbols(r.facets.symbols);
+      setMarkets(r.facets.markets);
+    });
   }, []);
 
   const s = report?.summary;
   return (
     <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-[1400px] space-y-4 p-4">
-        <Filters value={filters} onChange={setFilters} strategies={strategies} symbols={symbols} />
+      <div className="mx-auto max-w-[1400px] space-y-4 p-3 md:p-4">
+        <Filters value={{ ...emptyFilters, ...filters }} onChange={setFilters} strategies={strategies} symbols={symbols} markets={markets} />
         {error && <p className="text-down">{error}</p>}
         {s && report && (
           <>
@@ -56,7 +60,7 @@ export function Analytics() {
             {s.trades > 0 && (
               <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
                 <div className="panel p-3 xl:col-span-2">
-                  <h3 className="mb-2 text-[12px] text-muted">Cumulative net P&L (USDT)</h3>
+                  <h3 className="mb-2 text-[12px] text-muted">Cumulative net P&L (account currency)</h3>
                   <div className="h-[240px]">
                     <ResponsiveContainer>
                       <AreaChart data={report.equity} margin={{ top: 8, right: 8, bottom: 0, left: 8 }}>
@@ -64,11 +68,11 @@ export function Analytics() {
                         <XAxis dataKey="time" tickFormatter={(t) => fmtTime(t, tz).slice(5, 10)} stroke={AXIS} fontSize={11} tickLine={false} axisLine={false} minTickGap={40} />
                         <YAxis stroke={AXIS} fontSize={11} tickLine={false} axisLine={false} width={64} tickFormatter={(v) => fmtMoney(v, { decimals: tickDecimals(report.equity.map((p) => p.equity)) })} />
                         <Tooltip content={<EquityTip tz={tz} field="equity" label="Cumulative" />} cursor={{ stroke: AXIS, strokeDasharray: "3 3" }} />
-                        <Area type="monotone" dataKey="equity" stroke={SERIES} strokeWidth={2} fill={SERIES} fillOpacity={0.12} dot={false} isAnimationActive={false} />
+                        <Area type="linear" dataKey="equity" stroke={SERIES} strokeWidth={2} fill={SERIES} fillOpacity={0.12} dot={false} isAnimationActive={false} />
                       </AreaChart>
                     </ResponsiveContainer>
                   </div>
-                  <h3 className="mb-2 mt-3 text-[12px] text-muted">Drawdown from peak (USDT)</h3>
+                  <h3 className="mb-2 mt-3 text-[12px] text-muted">Drawdown from peak</h3>
                   <div className="h-[110px]">
                     <ResponsiveContainer>
                       <AreaChart data={report.equity.map((p) => ({ ...p, dd: -p.drawdown }))} margin={{ top: 4, right: 8, bottom: 0, left: 8 }}>
@@ -76,7 +80,7 @@ export function Analytics() {
                         <XAxis dataKey="time" hide />
                         <YAxis stroke={AXIS} fontSize={11} tickLine={false} axisLine={false} width={64} tickFormatter={(v) => fmtMoney(v, { decimals: tickDecimals(report.equity.map((p) => -p.drawdown)) })} />
                         <Tooltip content={<EquityTip tz={tz} field="dd" label="Drawdown" />} cursor={{ stroke: AXIS, strokeDasharray: "3 3" }} />
-                        <Area type="monotone" dataKey="dd" stroke={DOWN} strokeWidth={2} fill={DOWN} fillOpacity={0.15} dot={false} isAnimationActive={false} />
+                        <Area type="linear" dataKey="dd" stroke={DOWN} strokeWidth={2} fill={DOWN} fillOpacity={0.15} dot={false} isAnimationActive={false} />
                       </AreaChart>
                     </ResponsiveContainer>
                   </div>
@@ -99,6 +103,7 @@ export function Analytics() {
             )}
             {s.trades > 0 && (
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <GroupTable title="Market (asset class)" groups={report.byMarket} />
                 <GroupTable title="Strategy" groups={report.byStrategy} />
                 <GroupTable title="Timeframe" groups={report.byTimeframe} />
                 <GroupTable title="Trading session (entry, UTC)" groups={report.bySession} />
@@ -142,7 +147,7 @@ function Kpis({ s }: { s: Summary }) {
 function GroupTable({ title, groups }: { title: string; groups: GroupStat[] }) {
   const max = Math.max(1, ...groups.map((g) => Math.abs(g.netPnl)));
   return (
-    <div className="panel overflow-hidden">
+    <div className="panel overflow-x-auto">
       <h3 className="border-b border-line px-3 py-2 text-[12px] text-muted">{title}</h3>
       <table className="data-table text-[12px]">
         <thead>

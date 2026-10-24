@@ -1,5 +1,6 @@
+import { getDb } from "@/lib/server/db/client";
 import { query } from "@/lib/server/http";
-import { getLiveFeed } from "@/lib/server/services/live";
+import { getLiveFeed, liveInstrument } from "@/lib/server/services/live";
 import { isTimeframe } from "@/lib/market/timeframes";
 
 export const dynamic = "force-dynamic";
@@ -13,6 +14,13 @@ export async function GET(req: Request) {
   if (!/^[A-Z0-9]{2,20}$/.test(symbol) || !isTimeframe(timeframe)) {
     return Response.json({ error: "Invalid symbol or timeframe" }, { status: 400 });
   }
+  let instrumentId: string;
+  try {
+    instrumentId = (await liveInstrument(getDb(), symbol, q.get("provider") || undefined)).id;
+  } catch (e) {
+    // Unavailable: say so explicitly instead of streaming anything else.
+    return Response.json({ error: e instanceof Error ? e.message : String(e), unavailable: true }, { status: 409 });
+  }
   const feed = getLiveFeed();
   const encoder = new TextEncoder();
   let cleanup = () => {};
@@ -25,7 +33,7 @@ export async function GET(req: Request) {
           cleanup();
         }
       };
-      const unwatch = feed.watch(symbol, timeframe, send);
+      const unwatch = feed.watch(instrumentId, timeframe, send);
       const heartbeat = setInterval(() => send({ type: "heartbeat", time: Date.now() }), 15_000);
       cleanup = () => {
         clearInterval(heartbeat);

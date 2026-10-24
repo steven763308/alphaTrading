@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CandleChart, type CandleChartHandle, type ChartClick, type ChartLine, type ChartMarker } from "@/components/CandleChart";
+import { MarketPicker } from "@/components/MarketPicker";
 import { Toasts } from "@/components/Toasts";
 import { unrealizedPnl } from "@/lib/engine/math";
-import type { Bar, CostModel, InstrumentSpec } from "@/lib/engine/types";
+import type { Bar, Conversion, CostModel, InstrumentSpec } from "@/lib/engine/types";
+import { conversionPair, resolveConversion } from "@/lib/market/conversion";
 import { TIMEFRAMES, barStart } from "@/lib/market/timeframes";
 import { ApiError, api, qs } from "@/lib/client/api";
 import { fmtMoney, fmtTime, pnlClass } from "@/lib/client/format";
@@ -16,8 +18,9 @@ import { TradesPanel } from "./TradesPanel";
 
 type Mode = "historical" | "live";
 type Command = Record<string, unknown> & { kind: string };
+type TapTool = "entry" | "sl" | "tp" | null;
 
-const COLORS = { up: "#26a69a", down: "#ef5350", entry: "#8a94a3", draft: "#3987e5", order: "#c3c2b7" };
+const COLORS = { up: "#26a69a", down: "#ef5350", draft: "#3987e5", order: "#c3c2b7" };
 const SPEEDS = [1, 2, 5, 10, 25, 60];
 
 const emptyDraft = (riskPercent: number): TicketDraft => ({
@@ -36,12 +39,18 @@ const emptyDraft = (riskPercent: number): TicketDraft => ({
 /** Shape both modes expose to the shared chart/ticket UI. */
 interface Trading {
   symbol: string;
+  instrumentId: string;
   timeframe: string;
   spec: InstrumentSpec;
+  unit: string;
   costs: CostModel;
+  conversion: Conversion | undefined;
+  accountCurrency: string;
   price: number | null;
   balance: number;
   startingBalance: number;
+  /** Server-computed unrealized for positions not on the charted instrument. */
+  serverUnrealized: Record<string, number>;
   openPositions: PositionRow[];
   pendingOrders: OrderRow[];
   closedPositions: PositionRow[];
@@ -49,6 +58,7 @@ interface Trading {
   flagsByPosition: Record<string, string[]>;
   prices: Record<string, number>;
   disabledReason: string | null;
+  marketNote: string | null;
 }
 
 export function Simulator() {
@@ -72,20 +82,26 @@ function SimulatorInner({ settings }: { settings: AppSettings }) {
   const [lastBarTime, setLastBarTime] = useState<number | null>(null);
   const [draft, setDraft] = useState<TicketDraft>(() => emptyDraft(settings.riskPercent));
   const [busy, setBusy] = useState(false);
+  const [tool, setTool] = useState<TapTool>(null);
+  const [panel, setPanel] = useState<"order" | "trades">("order");
 
   const hist = useHistorical(mode === "historical", chartRef, setLastBarTime, push);
   const live = useLive(mode === "live", settings, chartRef, setLastBarTime, push);
   const t: Trading | null = mode === "historical" ? hist.trading : live.trading;
 
-  const equity = useMemo(() => {
+  const unrealized = useMemo(() => {
     if (!t) return 0;
     let u = 0;
     for (const p of t.openPositions) {
-      const m = t.prices[p.symbol];
-      if (m) u += unrealizedPnl(p.direction as "long" | "short", p.entryPrice, m, p.qty, t.spec, t.costs);
+      if (p.instrumentId === t.instrumentId) {
+        const m = t.prices[p.instrumentId];
+        if (m) u += unrealizedPnl(p.direction as "long" | "short", p.entryPrice, m, p.qty, t.spec, t.costs, t.conversion);
+      } else u += t.serverUnrealized[p.id] ?? 0;
     }
-    return t.balance + u;
+    return u;
   }, [t]);
+  const equity = t ? t.balance + unrealized : 0;
+  const usedMargin = t ? t.openPositions.reduce((s, p) => s + (p.margin ?? 0), 0) : 0;
 
   const { command: histCommand, refresh: histRefresh } = hist;
   const { command: liveCommand, refresh: liveRefresh } = live;
@@ -115,14 +131,14 @@ function SimulatorInner({ settings }: { settings: AppSettings }) {
     if (!t) return [];
     const out: ChartLine[] = [];
     for (const p of t.openPositions) {
-      if (p.symbol !== t.symbol) continue;
+      if (p.instrumentId !== t.instrumentId) continue;
       const long = p.direction === "long";
       out.push({ id: `pos:${p.id}:entry`, price: p.entryPrice, color: long ? COLORS.up : COLORS.down, title: `${long ? "L" : "S"} ${p.qty}` });
       if (p.sl != null) out.push({ id: `pos:${p.id}:sl`, price: p.sl, color: COLORS.down, title: "SL", style: "dashed", draggable: true });
       if (p.tp != null) out.push({ id: `pos:${p.id}:tp`, price: p.tp, color: COLORS.up, title: "TP", style: "dashed", draggable: true });
     }
     for (const o of t.pendingOrders) {
-      if (o.symbol !== t.symbol || o.price == null) continue;
+      if (o.instrumentId !== t.instrumentId || o.price == null) continue;
       out.push({ id: `ord:${o.id}:price`, price: o.price, color: COLORS.order, title: `${o.side === "buy" ? "Buy" : "Sell"} ${o.type}`, style: "dashed", draggable: true });
       if (o.sl != null) out.push({ id: `ord:${o.id}:sl`, price: o.sl, color: COLORS.down, title: "SL", style: "dotted", draggable: true });
       if (o.tp != null) out.push({ id: `ord:${o.id}:tp`, price: o.tp, color: COLORS.up, title: "TP", style: "dotted", draggable: true });
@@ -138,12 +154,10 @@ function SimulatorInner({ settings }: { settings: AppSettings }) {
     const snap = (time: number) => Math.min(barStart(time, t.timeframe), lastBarTime);
     const out: ChartMarker[] = [];
     for (const p of [...t.closedPositions, ...t.openPositions]) {
-      if (p.symbol !== t.symbol) continue;
+      if (p.instrumentId !== t.instrumentId) continue;
       const long = p.direction === "long";
       out.push({ time: snap(p.entryTime), position: long ? "belowBar" : "aboveBar", color: long ? COLORS.up : COLORS.down, shape: long ? "arrowUp" : "arrowDown" });
-      if (p.exitTime != null) {
-        out.push({ time: snap(p.exitTime), position: long ? "aboveBar" : "belowBar", color: (p.netPnl ?? 0) >= 0 ? COLORS.up : COLORS.down, shape: "circle" });
-      }
+      if (p.exitTime != null) out.push({ time: snap(p.exitTime), position: long ? "aboveBar" : "belowBar", color: (p.netPnl ?? 0) >= 0 ? COLORS.up : COLORS.down, shape: "circle" });
     }
     return out;
   }, [t, lastBarTime]);
@@ -168,56 +182,99 @@ function SimulatorInner({ settings }: { settings: AppSettings }) {
   const onChartClick = useCallback(
     (c: ChartClick) => {
       if (marketPrice == null) return;
-      if (c.alt) {
+      // Touch: an active tap tool decides; mouse: Alt / Shift / Ctrl modifiers.
+      const which: TapTool = tool ?? (c.alt ? "entry" : c.shift ? "sl" : c.ctrl ? "tp" : null);
+      if (!which) return;
+      if (which === "entry") {
         setDraft((d) => {
           const below = c.price < marketPrice;
           const type = d.side === "buy" ? (below ? "limit" : "stop") : below ? "stop" : "limit";
           return { ...d, entry: c.price, type };
         });
-      } else if (c.shift) setDraft((d) => ({ ...d, sl: c.price }));
-      else if (c.ctrl) setDraft((d) => ({ ...d, tp: c.price }));
+      } else setDraft((d) => ({ ...d, [which]: c.price }));
+      setTool(null);
+      setPanel("order");
     },
-    [marketPrice],
+    [marketPrice, tool],
   );
 
   const submit = async (o: { side: "buy" | "sell"; type: TicketDraft["type"]; qty: number; price: number | null; sl: number | null; tp: number | null }) => {
-    const ok = await send({
-      kind: "place",
-      clientOrderId: crypto.randomUUID(),
-      ...o,
-      strategyId: draft.strategyId,
-      entryNote: draft.note || null,
-    });
+    const ok = await send({ kind: "place", clientOrderId: crypto.randomUUID(), ...o, strategyId: draft.strategyId, entryNote: draft.note || null });
     if (ok) setDraft((d) => ({ ...emptyDraft(d.riskPercent), side: d.side, sizing: d.sizing, qty: d.qty, strategyId: d.strategyId }));
   };
 
   const realized = t ? t.balance - t.startingBalance : 0;
+  const disabled = t ? (t.disabledReason ?? (draft.type === "market" && t.marketNote ? `Market closed: ${t.marketNote}. Pending orders are still accepted.` : null)) : null;
+
+  const ticket = t ? (
+    <OrderTicket
+      draft={draft}
+      onChange={setDraft}
+      spec={t.spec}
+      costs={t.costs}
+      conversion={t.conversion}
+      accountCurrency={t.accountCurrency}
+      unit={t.unit}
+      price={t.price}
+      equity={equity}
+      freeMargin={t.spec.leverage ? equity - usedMargin : null}
+      strategies={strategies}
+      disabledReason={disabled}
+      submitting={busy}
+      onSubmit={submit}
+    />
+  ) : (
+    <p className="p-4 text-muted">The order ticket appears once market data is loaded.</p>
+  );
+
+  const trades = t ? (
+    <TradesPanel
+      openPositions={t.openPositions}
+      pendingOrders={t.pendingOrders}
+      closedPositions={t.closedPositions}
+      recentOrders={t.recentOrders}
+      flagsByPosition={t.flagsByPosition}
+      prices={t.prices}
+      instrumentId={t.instrumentId}
+      spec={t.spec}
+      costs={t.costs}
+      conversion={t.conversion}
+      serverUnrealized={t.serverUnrealized}
+      timeZone={settings.timeZone}
+      busy={busy}
+      onClose={(id) => void send({ kind: "close", positionId: id })}
+      onCancel={(id) => void send({ kind: "cancel", orderId: id })}
+    />
+  ) : null;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* Toolbar */}
-      <div className="flex h-11 shrink-0 items-center gap-3 border-b border-line px-3">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line px-2 py-1.5 md:px-3">
         <div className="flex rounded-md bg-bg p-0.5">
           {(["historical", "live"] as const).map((m) => (
-            <button key={m} onClick={() => setMode(m)} className={`whitespace-nowrap rounded px-3 py-1 ${mode === m ? "bg-raised text-ink" : "text-muted hover:text-ink"}`}>
+            <button key={m} onClick={() => setMode(m)} className={`whitespace-nowrap rounded px-3 py-1.5 ${mode === m ? "bg-raised text-ink" : "text-muted hover:text-ink"}`}>
               {m === "historical" ? "Historical" : "Live Paper"}
             </button>
           ))}
         </div>
         {mode === "historical" ? hist.toolbar : live.toolbar}
         {t && (
-          <div className="ml-auto flex items-center gap-5 text-[12px]">
-            <Stat k="Balance" v={fmtMoney(t.balance)} />
-            <Stat k="Equity" v={fmtMoney(equity)} />
-            <Stat k="Unrealized" v={fmtMoney(equity - t.balance, { sign: true })} cls={pnlClass(equity - t.balance)} />
-            <Stat k="Realized" v={fmtMoney(realized, { sign: true })} cls={pnlClass(realized)} />
+          <div className="ml-auto flex items-center gap-4 text-[12px]">
+            <Stat k={`Equity ${t.accountCurrency}`} v={fmtMoney(equity)} />
+            <Stat k="Unrealized" v={fmtMoney(unrealized, { sign: true })} cls={pnlClass(unrealized)} />
+            <span className="hidden sm:contents">
+              <Stat k="Balance" v={fmtMoney(t.balance)} />
+              <Stat k="Realized" v={fmtMoney(realized, { sign: true })} cls={pnlClass(realized)} />
+              {t.spec.leverage ? <Stat k="Free margin" v={fmtMoney(equity - usedMargin)} /> : null}
+            </span>
           </div>
         )}
       </div>
 
-      <div className="flex min-h-0 flex-1">
-        <div className="flex min-w-0 flex-1 flex-col">
-          <div className="relative min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="relative min-h-[240px] flex-1">
             <CandleChart
               ref={chartRef}
               tickSize={t?.spec.tickSize ?? 0.01}
@@ -229,50 +286,46 @@ function SimulatorInner({ settings }: { settings: AppSettings }) {
               onChartClick={onChartClick}
               onNeedHistory={mode === "historical" ? hist.loadOlder : live.loadOlder}
             />
+            {t && (
+              <div className="absolute right-16 top-1.5 z-20 flex items-center gap-1">
+                {tool && <span className="mr-1 hidden rounded bg-raised px-2 py-1 text-[11px] text-warn sm:inline">Tap the chart to set {tool.toUpperCase()}</span>}
+                {(["entry", "sl", "tp"] as const).map((k) => (
+                  <button
+                    key={k}
+                    onClick={() => setTool(tool === k ? null : k)}
+                    className={`rounded border px-2 py-1 text-[11px] font-medium ${tool === k ? "border-warn bg-warn/15 text-warn" : "border-line-strong bg-panel/90 text-muted"}`}
+                    title={`Tap, then tap the chart to set ${k.toUpperCase()}`}
+                  >
+                    {k === "entry" ? "Entry" : k.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            )}
             {!t && (
-              <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center text-muted">
-                {mode === "historical" ? "Create or open a backtest session to start." : "Connecting to live market data…"}
+              <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center p-6 text-center text-muted">
+                {mode === "historical" ? "Create or open a backtest session to start." : (live.unavailable ?? "Connecting to live market data…")}
               </div>
             )}
           </div>
-          <div className="flex h-10 shrink-0 items-center gap-3 border-t border-line px-3">{mode === "historical" ? hist.playback(settings.timeZone) : live.statusBar(settings.timeZone)}</div>
-          <div className="h-[220px] shrink-0 border-t border-line">
-            {t && (
-              <TradesPanel
-                openPositions={t.openPositions}
-                pendingOrders={t.pendingOrders}
-                closedPositions={t.closedPositions}
-                recentOrders={t.recentOrders}
-                flagsByPosition={t.flagsByPosition}
-                prices={t.prices}
-                spec={t.spec}
-                costs={t.costs}
-                timeZone={settings.timeZone}
-                busy={busy}
-                onClose={(id) => void send({ kind: "close", positionId: id })}
-                onCancel={(id) => void send({ kind: "cancel", orderId: id })}
-              />
-            )}
+          <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-2 border-t border-line px-2 py-1.5 md:px-3">
+            {mode === "historical" ? hist.playback(settings.timeZone) : live.statusBar(settings.timeZone)}
           </div>
+          <div className="hidden h-[220px] shrink-0 border-t border-line lg:block">{trades}</div>
         </div>
-        <aside className="w-[300px] shrink-0 overflow-y-auto border-l border-line bg-panel">
-          {t ? (
-            <OrderTicket
-              draft={draft}
-              onChange={setDraft}
-              spec={t.spec}
-              costs={t.costs}
-              price={t.price}
-              equity={equity}
-              strategies={strategies}
-              disabledReason={t.disabledReason}
-              submitting={busy}
-              onSubmit={submit}
-            />
-          ) : (
-            <p className="p-4 text-muted">Order ticket appears once market data is loaded.</p>
-          )}
-        </aside>
+
+        <aside className="hidden w-[300px] shrink-0 overflow-y-auto border-l border-line bg-panel lg:block">{ticket}</aside>
+
+        {/* Phones, Fold, iPad portrait: bottom panel */}
+        <div className="flex h-[46%] min-h-[260px] shrink-0 flex-col border-t border-line bg-panel lg:hidden">
+          <div className="flex shrink-0 border-b border-line">
+            {(["order", "trades"] as const).map((k) => (
+              <button key={k} onClick={() => setPanel(k)} className={`flex-1 py-2 ${panel === k ? "border-b-2 border-accent text-ink" : "text-muted"}`}>
+                {k === "order" ? "Order" : `Trades${t ? ` (${t.openPositions.length + t.pendingOrders.length})` : ""}`}
+              </button>
+            ))}
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto">{panel === "order" ? ticket : trades}</div>
+        </div>
       </div>
       {hist.dialog(strategies, settings)}
       <Toasts toasts={toasts} dismiss={dismiss} />
@@ -469,22 +522,29 @@ function useHistorical(
   const trading: Trading | null = useMemo(() => {
     // A stale view from a previously selected session is never shown.
     if (!view || !active || view.session.id !== sessionId) return null;
-    const spec = { symbol: view.instrument.symbol, tickSize: view.instrument.tickSize, qtyStep: view.instrument.qtyStep, minQty: view.instrument.minQty, contractSize: view.instrument.contractSize };
+    const i = view.instrument;
+    const spec: InstrumentSpec = { symbol: i.symbol, tickSize: i.tickSize, qtyStep: i.qtyStep, minQty: i.minQty, contractSize: i.contractSize, leverage: view.leverage ?? undefined };
     return {
-      symbol: view.instrument.symbol,
+      symbol: i.symbol,
+      instrumentId: i.id,
       timeframe: view.session.timeframe,
       spec,
+      unit: i.unit,
       costs: view.costs,
+      conversion: view.conversion,
+      accountCurrency: view.account.currency,
       price: view.price || null,
       balance: view.account.balance,
       startingBalance: view.account.startingBalance,
+      serverUnrealized: {},
       openPositions: view.openPositions,
       pendingOrders: view.pendingOrders,
       closedPositions: view.closedPositions,
       recentOrders: view.recentOrders,
       flagsByPosition: view.flagsByPosition,
-      prices: { [view.instrument.symbol]: view.price },
+      prices: { [i.id]: view.price },
       disabledReason: view.session.status === "completed" ? "Session completed — no further trading." : null,
+      marketNote: null,
     };
   }, [view, active, sessionId]);
 
@@ -494,37 +554,32 @@ function useHistorical(
   };
 
   const toolbar = (
-      <>
-        <select
-          className="input w-[280px]"
-          value={sessionId ?? ""}
-          onFocus={loadSessions}
-          onChange={(e) => selectSession(e.target.value || null)}
+    <>
+      <select className="input order-last w-full sm:order-none sm:w-[300px]" value={sessionId ?? ""} onFocus={loadSessions} onChange={(e) => selectSession(e.target.value || null)}>
+        <option value="">Select a session…</option>
+        {sessions.map((s) => (
+          <option key={s.session.id} value={s.session.id}>
+            {s.session.name} · {s.trades} trades{s.session.status === "completed" ? " · done" : ""}
+          </option>
+        ))}
+      </select>
+      <button className="btn" onClick={() => setShowNew(true)}>
+        New<span className="hidden sm:inline"> session</span>
+      </button>
+      {view && (
+        <button
+          className="btn btn-ghost hidden text-[12px] sm:inline-flex"
+          onClick={async () => {
+            if (!confirm(`Delete session "${view.session.name}" and all its trades?`)) return;
+            await api(`/api/sessions/${view.session.id}`, { method: "DELETE" });
+            selectSession(null);
+            loadSessions();
+          }}
         >
-          <option value="">Select a session…</option>
-          {sessions.map((s) => (
-            <option key={s.session.id} value={s.session.id}>
-              {s.session.name} · {s.trades} trades{s.session.status === "completed" ? " · done" : ""}
-            </option>
-          ))}
-        </select>
-        <button className="btn" onClick={() => setShowNew(true)}>
-          New session
+          Delete
         </button>
-        {view && (
-          <button
-            className="btn btn-ghost text-[12px]"
-            onClick={async () => {
-              if (!confirm(`Delete session "${view.session.name}" and all its trades?`)) return;
-              await api(`/api/sessions/${view.session.id}`, { method: "DELETE" });
-              selectSession(null);
-              loadSessions();
-            }}
-          >
-            Delete
-          </button>
-        )}
-      </>
+      )}
+    </>
   );
 
   const playback = (timeZone: string) => {
@@ -542,27 +597,27 @@ function useHistorical(
         <button className="btn" disabled={done || playing} onClick={() => void step(10)}>
           +10
         </button>
-        <select className="input w-[84px]" value={speed} onChange={(e) => setSpeed(Number(e.target.value))} title="Bars per second">
+        <select className="input w-[96px]" value={speed} onChange={(e) => setSpeed(Number(e.target.value))} title="Bars per second">
           {SPEEDS.map((s) => (
             <option key={s} value={s}>
               {s} bar/s
             </option>
           ))}
         </select>
-        <div className="mx-2 h-1.5 w-40 overflow-hidden rounded bg-raised" title={`${view.progress.done}/${view.progress.total} bars`}>
+        <div className="mx-1 hidden h-1.5 w-32 overflow-hidden rounded bg-raised sm:block" title={`${view.progress.done}/${view.progress.total} bars`}>
           <div className="h-full bg-accent" style={{ width: `${pct}%` }} />
         </div>
         <span className="num text-[12px] text-muted">
           {view.progress.done}/{view.progress.total}
         </span>
-        <span className="num text-[12px]">Sim time {fmtTime(view.simTime, timeZone)}</span>
+        <span className="num text-[12px]">{fmtTime(view.simTime, timeZone)}</span>
         {view.warnings.length > 0 && (
-          <span className="cursor-help text-[12px] text-warn" title={view.warnings.join("\n")}>
-            ⚠ {view.warnings.length} data note{view.warnings.length > 1 ? "s" : ""}
+          <span className="cursor-help text-[12px] text-warn" title={view.warnings.join("\n")} onClick={() => push("info", view.warnings.join(" · "))}>
+            ⓘ {view.warnings.length}
           </span>
         )}
         <button className="btn btn-ghost ml-auto text-[12px]" disabled={verifying || playing} onClick={verify} title="Re-run the session from its command log and compare every fill">
-          {verifying ? "Verifying…" : "Verify replay"}
+          {verifying ? "Verifying…" : "Verify"}
         </button>
       </>
     );
@@ -589,7 +644,18 @@ function useHistorical(
 // Live paper trading
 // =============================================================================
 
-type FeedStatusEvent = Extract<LiveState["feed"], { type: "status" }>;
+type FeedStatusEvent = LiveState["feeds"][number];
+
+interface LiveInfo {
+  available: boolean;
+  reason?: string | null;
+  instrument?: InstrumentRow;
+  instrumentId?: string;
+  costs?: CostModel;
+  session?: { open: boolean; reason: string | null };
+  accountCurrency?: string;
+  capabilities?: { name: string; delay: string; verification: string; notes: string[] } | null;
+}
 
 function useLive(
   active: boolean,
@@ -600,22 +666,16 @@ function useLive(
 ) {
   const [symbol, setSymbol] = usePersistentState("tl.live.symbol", settings.defaultSymbol);
   const [timeframe, setTimeframe] = usePersistentState("tl.live.tf", settings.defaultTimeframe);
-  const [symbolInput, setSymbolInput] = useState(symbol);
-  const [symbolInputFor, setSymbolInputFor] = useState(symbol);
-  if (symbolInputFor !== symbol) {
-    // Adjust during render (not in an effect) when the persisted symbol loads or changes.
-    setSymbolInputFor(symbol);
-    setSymbolInput(symbol);
-  }
-  const [instrument, setInstrument] = useState<InstrumentRow | null>(null);
+  const [info, setInfo] = useState<LiveInfo | null>(null);
   const [state, setState] = useState<LiveState | null>(null);
   const [feed, setFeed] = useState<FeedStatusEvent | null>(null);
-  // Price is keyed by symbol so switching symbols never shows the previous symbol's price.
-  const [lastPrice, setLastPrice] = useState<{ symbol: string; price: number } | null>(null);
-  const price = lastPrice?.symbol === symbol ? lastPrice.price : null;
+  // Price is keyed by instrument so switching never shows the previous instrument's price.
+  const [lastPrice, setLastPrice] = useState<{ id: string; price: number } | null>(null);
   const [sseOk, setSseOk] = useState(false);
   const now = useNow(1000);
   const historyState = useRef({ loading: false, exhausted: false });
+  const instrumentId = info?.available ? info.instrumentId! : null;
+  const price = lastPrice && lastPrice.id === instrumentId ? lastPrice.price : null;
 
   const refresh = useCallback(async () => {
     try {
@@ -625,20 +685,21 @@ function useLive(
     }
   }, []);
 
-  // Instrument spec.
+  // Availability + spec for the chosen symbol.
   useEffect(() => {
     if (!active) return;
-    api<InstrumentRow>(`/api/market/symbol?symbol=${symbol}`)
-      .then(setInstrument)
-      .catch((e) => {
-        push("error", `${symbol}: ${e.message}`);
-        setInstrument(null);
-      });
-  }, [active, symbol, push]);
+    let cancelled = false;
+    api<LiveInfo>(`/api/live/instrument?symbol=${symbol}`)
+      .then((i) => !cancelled && setInfo(i))
+      .catch((e) => !cancelled && setInfo({ available: false, reason: e instanceof Error ? e.message : String(e) }));
+    return () => {
+      cancelled = true;
+    };
+  }, [active, symbol]);
 
-  // History + stream.
+  // History + stream (only when a live source exists).
   useEffect(() => {
-    if (!active) return;
+    if (!active || !instrumentId) return;
     let closed = false;
     historyState.current = { loading: false, exhausted: false };
     api<Bar[]>(`/api/market/candles${qs({ symbol, tf: timeframe, limit: 1000 })}`)
@@ -646,7 +707,7 @@ function useLive(
         if (closed) return;
         chartRef.current?.setData(bars);
         setLastBarTime(bars[bars.length - 1]?.time ?? null);
-        if (bars.length) setLastPrice({ symbol, price: bars[bars.length - 1].close });
+        if (bars.length) setLastPrice({ id: instrumentId, price: bars[bars.length - 1].close });
       })
       .catch((e) => push("error", `Could not load candles: ${e.message}`));
 
@@ -656,10 +717,10 @@ function useLive(
     es.onerror = () => setSseOk(false);
     es.onmessage = (ev) => {
       const e = JSON.parse(ev.data);
-      if (e.type === "candle" && e.timeframe === timeframe) {
+      if (e.type === "candle" && e.instrument === instrumentId && e.timeframe === timeframe) {
         chartRef.current?.update(e.bar);
         setLastBarTime(e.bar.time);
-      } else if (e.type === "price" && e.symbol === symbol) setLastPrice({ symbol, price: e.price });
+      } else if (e.type === "price" && e.instrument === instrumentId) setLastPrice({ id: instrumentId, price: e.price });
       else if (e.type === "status") setFeed(e);
       else if (e.type === "notice") push(e.level === "warn" ? "warn" : "info", e.message);
       else if (e.type === "account") {
@@ -677,7 +738,7 @@ function useLive(
       if (accountTimer) clearTimeout(accountTimer);
       setSseOk(false);
     };
-  }, [active, symbol, timeframe, chartRef, setLastBarTime, refresh, push]);
+  }, [active, symbol, timeframe, instrumentId, chartRef, setLastBarTime, refresh, push]);
 
   const loadOlder = useCallback(
     async (oldest: number) => {
@@ -703,83 +764,87 @@ function useLive(
     [symbol, timeframe],
   );
 
-  const symStatus = feed?.symbols?.[symbol];
+  const symStatus = instrumentId ? feed?.symbols?.[instrumentId] : undefined;
   const ageSec = symStatus?.receivedAt ? Math.max(0, Math.round((now - symStatus.receivedAt) / 1000)) : null;
-  const stale = ageSec == null || ageSec > settings.staleAfterSeconds;
+  const marketOpen = symStatus?.marketOpen ?? info?.session?.open ?? true;
+  const marketNote = marketOpen ? null : (symStatus?.marketNote ?? info?.session?.reason ?? "closed");
+  const stale = marketOpen && (ageSec == null || ageSec > settings.staleAfterSeconds);
   let disabledReason: string | null = null;
   if (!sseOk) disabledReason = "Not connected to the app server stream.";
-  else if (!feed || feed.status !== "connected") disabledReason = `Market data ${feed?.status ?? "connecting"} — trading paused.`;
+  else if (!feed || feed.status !== "connected") disabledReason = `Market data ${feed?.status ?? "connecting"}${feed?.detail ? ` (${feed.detail})` : ""} — trading paused.`;
   else if (stale) disabledReason = "Market data is stale — trading paused until fresh prices arrive.";
   else if (symStatus && !symStatus.reconciled) disabledReason = "Reconciling missed data…";
 
   const trading: Trading | null = useMemo(() => {
-    if (!state || !instrument || price == null) return null;
-    const prices: Record<string, number> = {};
-    for (const [s, st] of Object.entries(feed?.symbols ?? {})) if (st.price) prices[s] = st.price;
-    prices[symbol] = price;
+    if (!state || !info?.available || !info.instrument || !instrumentId || price == null) return null;
+    const inst = info.instrument;
+    const prices: Record<string, number> = { ...state.prices, [instrumentId]: price };
+    const route = conversionPair(inst, state.account.currency);
+    const conversion = resolveConversion(route, (pair) => prices[`${inst.sourceId}:${pair}`]) ?? undefined;
     return {
-      symbol,
+      symbol: inst.symbol,
+      instrumentId,
       timeframe,
-      spec: { symbol, tickSize: instrument.tickSize, qtyStep: instrument.qtyStep, minQty: instrument.minQty, contractSize: instrument.contractSize },
-      costs: state.costs,
+      spec: { symbol: inst.symbol, tickSize: inst.tickSize, qtyStep: inst.qtyStep, minQty: inst.minQty, contractSize: inst.contractSize, leverage: inst.leverage },
+      unit: inst.unit,
+      costs: info.costs!,
+      conversion,
+      accountCurrency: state.account.currency,
       price,
       balance: state.account.balance,
       startingBalance: state.account.startingBalance,
+      serverUnrealized: state.unrealizedByPosition,
       openPositions: state.openPositions,
       pendingOrders: state.pendingOrders,
       closedPositions: state.closedPositions,
       recentOrders: state.recentOrders,
       flagsByPosition: state.flagsByPosition,
       prices,
-      disabledReason,
+      disabledReason: route?.kind === "rate" && !conversion ? `Waiting for a live ${route.pair} price to convert P&L…` : disabledReason,
+      marketNote,
     };
-  }, [state, instrument, price, feed, symbol, timeframe, disabledReason]);
+  }, [state, info, instrumentId, price, timeframe, disabledReason, marketNote]);
 
-  const applySymbol = () => {
-    const s = symbolInput.trim().toUpperCase();
-    if (/^[A-Z0-9]{2,20}$/.test(s) && s !== symbol) setSymbol(s);
-    else setSymbolInput(symbol);
-  };
+  const unavailable = info && !info.available ? `Live data unavailable for ${symbol}. ${info.reason ?? ""}` : null;
 
   const toolbar = (
     <>
-      <input
-        className="input num w-[120px] uppercase"
-        value={symbolInput}
-        onChange={(e) => setSymbolInput(e.target.value.toUpperCase())}
-        onBlur={applySymbol}
-        onKeyDown={(e) => e.key === "Enter" && applySymbol()}
-        title="Any Binance spot symbol, e.g. ETHUSDT"
-      />
-      <select className="input w-[72px]" value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
-        {TIMEFRAMES.map((tf) => (
-          <option key={tf}>{tf}</option>
-        ))}
-      </select>
+      <div className="order-last flex w-full gap-2 sm:order-none sm:w-auto">
+        <MarketPicker mode="live" value={symbol} onChange={setSymbol} className="min-w-0 flex-1 sm:w-[180px] sm:flex-none" />
+        <select className="input w-[76px]" value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
+          {TIMEFRAMES.map((tf) => (
+            <option key={tf}>{tf}</option>
+          ))}
+        </select>
+      </div>
     </>
   );
 
   const statusBar = (timeZone: string) => {
-    const status = !sseOk ? "server stream down" : (feed?.status ?? "connecting");
+    if (unavailable) return <span className="text-[12px] text-warn">{unavailable}</span>;
     const good = sseOk && feed?.status === "connected" && !stale;
     return (
       <>
         <span className={`h-2 w-2 rounded-full ${good ? "bg-up" : feed?.status === "connecting" ? "bg-warn" : "bg-down"}`} />
         <span className="text-[12px]">
-          {good ? "Live" : stale && feed?.status === "connected" ? "Stale" : status}
+          {good ? "Live" : stale && feed?.status === "connected" ? "Stale" : !sseOk ? "server stream down" : (feed?.status ?? "connecting")}
           {feed?.detail ? ` · ${feed.detail}` : ""}
         </span>
+        {info?.capabilities && <span className="hidden text-[12px] text-muted sm:inline">{info.capabilities.name}</span>}
+        <span className={`rounded px-1.5 text-[11px] ${marketOpen ? "bg-up/15 text-up" : "bg-raised text-muted"}`} title={marketNote ?? "Regular session open"}>
+          {marketOpen ? "Market open" : `Closed · ${marketNote}`}
+        </span>
         <span className="num text-[12px] text-muted">
-          Last data {symStatus?.eventTime ? fmtTime(symStatus.eventTime, timeZone, true) : "—"}
-          {ageSec != null ? ` (${ageSec}s ago)` : ""}
+          {symStatus?.eventTime ? fmtTime(symStatus.eventTime, timeZone, true) : "—"}
+          {ageSec != null ? ` (${ageSec}s)` : ""}
         </span>
         {symStatus?.note && <span className="text-[12px] text-warn">{symStatus.note}</span>}
-        <span className="ml-auto max-w-[520px] truncate text-[11px] text-faint" title={state?.notice}>
-          Paper orders are monitored only while this app runs; missed periods are reconciled from 1m candles and flagged.
+        <span className="ml-auto hidden max-w-[460px] truncate text-[11px] text-faint xl:inline" title={state?.notice}>
+          Monitored only while this app runs — offline execution needs an always-on service.
         </span>
       </>
     );
   };
 
-  return { trading, toolbar, statusBar, loadOlder, command, refresh };
+  return { trading, toolbar, statusBar, loadOlder, command, refresh, unavailable };
 }

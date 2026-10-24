@@ -24,9 +24,17 @@ export function openDb(file: string): { db: Db; sqlite: Database.Database } {
   return { db, sqlite };
 }
 
+let migratedThisModule = false;
+
 export function getDb(): Db {
   if (!globalForDb.__tradelabDb) {
     globalForDb.__tradelabDb = openDb(process.env.DATABASE_PATH || "./data/tradelab.db");
+    migratedThisModule = true;
+  } else if (!migratedThisModule) {
+    // The connection survives dev hot-reloads; apply any migrations added since (idempotent).
+    migrate(globalForDb.__tradelabDb.db, { migrationsFolder: path.resolve(process.cwd(), "drizzle") });
+    seed(globalForDb.__tradelabDb.db);
+    migratedThisModule = true;
   }
   return globalForDb.__tradelabDb.db;
 }

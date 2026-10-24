@@ -175,6 +175,22 @@ table.data-table td.r {
 }
 }
 
+/* Touch devices: iOS zooms into inputs below 16px, and fingers need bigger targets. */
+@media (max-width: 767px), (pointer: coarse) {
+  .input {
+    font-size: 16px;
+    padding: 7px 10px;
+  }
+  .btn {
+    min-height: 38px;
+  }
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;

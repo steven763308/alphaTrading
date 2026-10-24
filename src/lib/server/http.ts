@@ -1,6 +1,6 @@
 import { ZodError, type ZodType } from "zod";
 import { EngineError } from "@/lib/engine/types";
-import { MarketDataError } from "@/lib/market/provider";
+import { MarketDataError, ProviderUnavailableError } from "@/lib/market/provider";
 import { DuplicateExecutionError } from "./repo/trading";
 import { ConflictError, NotFoundError } from "./services/backtest";
 
@@ -15,6 +15,7 @@ function errorResponse(err: unknown) {
   if (err instanceof NotFoundError) return json({ error: err.message }, { status: 404 });
   if (err instanceof ConflictError || err instanceof DuplicateExecutionError) return json({ error: err.message, conflict: true }, { status: 409 });
   if (err instanceof EngineError) return json({ error: err.message }, { status: 422 });
+  if (err instanceof ProviderUnavailableError) return json({ error: err.message, unavailable: true }, { status: 409 });
   if (err instanceof MarketDataError) return json({ error: `Market data unavailable: ${err.message}` }, { status: 502 });
   console.error(err);
   return json({ error: err instanceof Error ? err.message : "Internal error" }, { status: 500 });

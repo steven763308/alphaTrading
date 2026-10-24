@@ -67,7 +67,8 @@ interface Props {
 
 const toSec = (ms: number) => Math.floor(ms / 1000) as UTCTimestamp;
 const STYLE = { solid: LineStyle.Solid, dashed: LineStyle.Dashed, dotted: LineStyle.Dotted };
-const GRAB_PX = 6;
+/** Grab tolerance around a draggable line: fingers need more room than a mouse. */
+const GRAB_PX = { mouse: 6, touch: 18 };
 
 export const CandleChart = forwardRef<CandleChartHandle, Props>(function CandleChart(props, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -141,14 +142,14 @@ export const CandleChart = forwardRef<CandleChartHandle, Props>(function CandleC
     });
 
     // Dragging price lines: intercept pointerdown before the chart starts panning.
-    const nearestLine = (y: number) => {
+    const nearestLine = (y: number, tolerance = GRAB_PX.mouse) => {
       let best: { id: string; dist: number } | null = null;
       for (const [id, { spec }] of linesRef.current) {
         if (!spec.draggable) continue;
         const cy = series.priceToCoordinate(spec.price);
         if (cy == null) continue;
         const dist = Math.abs(cy - y);
-        if (dist <= GRAB_PX && (!best || dist < best.dist)) best = { id, dist };
+        if (dist <= tolerance && (!best || dist < best.dist)) best = { id, dist };
       }
       return best?.id ?? null;
     };
@@ -160,7 +161,7 @@ export const CandleChart = forwardRef<CandleChartHandle, Props>(function CandleC
 
     const onDown = (e: PointerEvent) => {
       if (e.button !== 0) return;
-      const id = nearestLine(localY(e));
+      const id = nearestLine(localY(e), e.pointerType === "mouse" ? GRAB_PX.mouse : GRAB_PX.touch);
       if (!id) return;
       dragRef.current = id;
       chart.applyOptions({ handleScroll: false, handleScale: false });
