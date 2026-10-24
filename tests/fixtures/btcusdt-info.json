@@ -1,0 +1,9 @@
+{
+  "symbol": "BTCUSDT",
+  "baseAsset": "BTC",
+  "quoteAsset": "USDT",
+  "tickSize": 0.01,
+  "qtyStep": 0.00001,
+  "minQty": 0.00001,
+  "contractSize": 1
+}

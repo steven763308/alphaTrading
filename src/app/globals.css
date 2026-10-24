@@ -1,0 +1,188 @@
+@import "tailwindcss";
+
+/* Dark trading-terminal palette. Chart colors validated for CVD separation on --bg-panel. */
+:root {
+  color-scheme: dark;
+  --bg: #0b0e13;
+  --bg-panel: #0f131a;
+  --bg-raised: #151a23;
+  --bg-hover: #1b212c;
+  --border: #1f2632;
+  --border-strong: #2b3442;
+  --text: #d8dde5;
+  --text-muted: #8a94a3;
+  --text-faint: #5d6675;
+  --accent: #3987e5;
+  --up: #26a69a;
+  --down: #ef5350;
+  --warn: #fab219;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--bg-panel);
+  --color-raised: var(--bg-raised);
+  --color-hover: var(--bg-hover);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+  --color-ink: var(--text);
+  --color-muted: var(--text-muted);
+  --color-faint: var(--text-faint);
+  --color-accent: var(--accent);
+  --color-up: var(--up);
+  --color-down: var(--down);
+  --color-warn: var(--warn);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--text);
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+  font-size: 13px;
+}
+
+.num {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Component classes live in the components layer so Tailwind utilities can override them. */
+@layer components {
+/* Form controls */
+.input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  color: var(--text);
+  width: 100%;
+  outline: none;
+}
+.input:focus {
+  border-color: var(--accent);
+}
+.input:disabled {
+  opacity: 0.5;
+}
+select.input {
+  padding-right: 4px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+.btn-primary:hover:not(:disabled) {
+  background: #2f76cc;
+}
+.btn-buy {
+  background: var(--up);
+  border-color: var(--up);
+  color: #04110f;
+}
+.btn-buy:hover:not(:disabled) {
+  background: #2bb8aa;
+}
+.btn-sell {
+  background: var(--down);
+  border-color: var(--down);
+  color: #1a0505;
+}
+.btn-sell:hover:not(:disabled) {
+  background: #f26b68;
+}
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+.btn-ghost:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.label {
+  display: block;
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-bottom: 3px;
+}
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+/* Data tables (not named "grid": that collides with Tailwind's display utility). */
+table.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+table.data-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  background: var(--bg-panel);
+}
+table.data-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+table.data-table tr.clickable:hover td {
+  background: var(--bg-hover);
+  cursor: pointer;
+}
+table.data-table th.r,
+table.data-table td.r {
+  text-align: right;
+}
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
